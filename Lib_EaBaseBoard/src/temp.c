@@ -143,5 +143,4 @@ int32_t temp_read (void)
     }
 
 
-    return ( (2*1000*t2) / (NUM_HALF_PERIODS*TEMP_SCALAR_DIV10) - 2731 );
-}
+    return ( (2*1000*t2) / (NUM_HALF_PERIODS*TEMP_SCALAR_DIV10) - 2731 );}
