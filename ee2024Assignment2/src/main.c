@@ -12,9 +12,10 @@
 #include "oled.h"
 #include "rgb.h"
 #include "led7seg.h"
+#include "math.h"
+
 #include <stdio.h>
 #define PINSEL_EINT0	20
-static uint8_t barPos = 2;
 
 volatile uint32_t msTicks; // counter for 1ms SysTicks
 volatile uint32_t prevMstVal = 0;
@@ -24,12 +25,20 @@ volatile uint32_t prevMstRed = 0;
 volatile uint8_t butSW3 = 0;
 uint32_t temperature = 0;
 uint32_t light = 1;
+uint8_t moved = 0;
 uint8_t monitorMode = 0;
 volatile uint32_t prevSW4Count = 0;
 const uint32_t lowestLight = 0;
 const uint32_t highestLight = 2000;
 uint8_t lightWarning = 0;
 uint8_t tempWarning = 0;
+uint8_t moveWarning = 0;
+
+uint8_t blinkBothLeds = 0;
+uint8_t blinkRedLed = 0;
+uint8_t blinkBlueLed = 0;
+
+//flags used for the blinking of RGB LEDs
 volatile uint8_t blueLedFlag = 0;
 volatile uint8_t redLedFlag = 0;
 volatile uint8_t brLedFlag = 0;
@@ -56,9 +65,6 @@ uint32_t getMsTicks() {
 }
 // EINT3 Interrupt Handler
 void EINT3_IRQHandler(void) {
-//	int i;
-
-	printf("eint3\n");
 
 	//NVIC_ClearPendingIRQ(EINT0_IRQn);
 	if ((LPC_GPIOINT ->IO2IntStatF >> 5) & 0x1) {
@@ -150,13 +156,21 @@ void setRGB(uint8_t ledCol) {
 }
 
 void blinkRGB() {
-	if (lightWarning && tempWarning) {
-		blinkBothRGB();
-	} else if (lightWarning && !tempWarning) {
-		blinkBlueRGB();
-	} else if (tempWarning && !lightWarning) {
-		blinkRedRGB();
+	if (lightWarning && tempWarning && moved) {
+		blinkBothLeds = 1;
+	} else if (lightWarning && moved && !tempWarning) {
+		blinkBlueLed = 1;
+	} else if (tempWarning) {
+		blinkRedLed = 1;
 	}
+
+	if (blinkBothLeds)
+		blinkBothRGB();
+	else if (blinkBlueLed)
+		blinkBlueRGB();
+	else if (blinkRedLed)
+		blinkRedRGB();
+
 }
 
 void blinkBothRGB() {
@@ -165,12 +179,10 @@ void blinkBothRGB() {
 		brLedFlag = !brLedFlag;
 		brPrevMst = currentMst;
 	}
-
 	if (brLedFlag) {
 		setRGB(0x5);
 	} else
 		setRGB(8);
-
 }
 
 void blinkBlueRGB() {
@@ -358,8 +370,8 @@ int main(void) {
 	acc_init();
 
 	init_uart();
-	UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg), BLOCKING);
 
+	/***initialize for light sensor interrupt****/
 	light_enable();
 	light_setRange(LIGHT_RANGE_4000);
 	light_setLoThreshold(20);
@@ -367,8 +379,7 @@ int main(void) {
 	light_setIrqInCycles(LIGHT_CYCLE_1);
 	light_clearIrqStatus();
 
-	/***initialize for light sensor interrupt****/LPC_GPIOINT ->IO2IntClr = 1
-			<< 5;
+	LPC_GPIOINT ->IO2IntClr = 1 << 5;
 	LPC_GPIOINT ->IO2IntEnF |= 1 << 5;
 	/*** -----------------------------------****/
 
@@ -384,9 +395,6 @@ int main(void) {
 	rgb_init();
 	led7seg_init();
 
-	//rgb_setLeds(!RGB_RED);
-	//!rgb_setLeds(7);
-
 	// Setup Accelerometer
 	int32_t xoff = 0;
 	int32_t yoff = 0;
@@ -401,17 +409,11 @@ int main(void) {
 	yoff = 0 - y;
 	zoff = 64 - z;
 
-	GPIO_SetDir(2, 1 << 0, 1);
-	GPIO_SetDir(2, 1 << 1, 1);
+	GPIO_SetDir(2, 1 << 0, 1); /**/
 
-	GPIO_SetDir(0, 1 << 27, 1);
-	GPIO_SetDir(0, 1 << 28, 1);
-	GPIO_SetDir(2, 1 << 13, 1);
-	GPIO_SetDir(0, 1 << 26, 1);
-
-	GPIO_ClearValue(0, 1 << 27); //LM4811-clk
-	GPIO_ClearValue(0, 1 << 28); //LM4811-up/dn
-	GPIO_ClearValue(2, 1 << 13); //LM4811-shutdn
+	int8_t moving = 0;
+	int8_t lastmove = 64;
+	int8_t delta = 0;
 
 	while (1) {
 
@@ -430,25 +432,22 @@ int main(void) {
 		if (butSW3) {
 			msTicks = 0;
 			butSW3 = 0;
+			acc_read(&x, &y, &z);
+			xoff = 0 - x;
+			yoff = 0 - y;
+			zoff = 64 - z;
 			LPC_SC ->EXTINT = (1 << 0); // clear interrupt flag for eint0
-			//NVIC_ClearPendingIRQ(EINT0_IRQn);
 		}
 
 		if (monitorMode) {
-
-			//uint32_t currenTemp = temp_interrupt();
-			//printf("%0.1f lol\n", currenTemp / 10.0 );
-
 			uint32_t currentMstValue = msTicks;
 			light_clearIrqStatus();
 			monitor7Seg((currentMstValue / 1000) % 16);
+
 			acc_read(&x, &y, &z);
 			x = x + xoff;
 			y = y + yoff;
 			z = z + zoff;
-
-			//rgb_setLeds(123);
-			//etRGB(3);
 
 			blinkRGB();
 			float k = temp_read() / 10.0;
@@ -456,6 +455,15 @@ int main(void) {
 			if (k > 28.0) {
 				tempWarning = 1;
 			}
+
+			moving = sqrt(x * x + y * y + z * z);
+			delta = moving - lastmove;
+			lastmove = moving;
+
+			if (delta > 3 || delta < -3) {
+				moved = 1;
+			} else
+				moved = 0;
 
 			if (((currentMstValue / 1000) % 16) % 5 == 0
 					&& ((currentMstValue / 1000) % 16) > 0) {
@@ -472,17 +480,12 @@ int main(void) {
 							"%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
 							uartCount++, temp_read() / 10.0, light_read(), x, y,
 							z);
-					/*printf("%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
-					 uartCount++, temp_read() / 10.0, light_read(), x, y,
-					 z);*/
 					UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg),
 							BLOCKING);
 				}
 			}
 
 		} else {
-			//monitorMode = 0;
-			//setRGB(3);
 			oled_clearScreen(OLED_COLOR_BLACK);
 			led7seg_setChar(99999, FALSE);
 			setRGB(8);
