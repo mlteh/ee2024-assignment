@@ -12,7 +12,8 @@
 #include "oled.h"
 #include "rgb.h"
 #include "led7seg.h"
-
+#include <stdio.h>
+#define PINSEL_EINT0	20
 static uint8_t barPos = 2;
 
 volatile uint32_t msTicks; // counter for 1ms SysTicks
@@ -20,7 +21,7 @@ volatile uint32_t prevMstVal = 0;
 volatile uint32_t prevMst = 0;
 volatile uint32_t brPrevMst = 0;
 volatile uint32_t prevMstRed = 0;
-volatile uint8_t butSW3 = 1;
+volatile uint8_t butSW3 = 0;
 uint32_t temperature = 0;
 uint32_t light = 1;
 uint8_t monitorMode = 0;
@@ -37,6 +38,13 @@ uint32_t uartCount = 0;
 static char* msg = NULL;
 static char* msgMovementDarkness = "Movement in darkness was Detected.\r\n";
 static char* msgFire = "Fire was Detected.\r\n";
+static char* msgEnterMonitor = "Entering MONITOR Mode.\r\n";
+
+//*****function prototype declarations*****//
+
+void blinkBothRGB();
+void blinkBlueRGB();
+void blinkRedRGB();
 
 // ****************
 //  SysTick_Handler - just increment SysTick counter
@@ -49,21 +57,23 @@ uint32_t getMsTicks() {
 // EINT3 Interrupt Handler
 void EINT3_IRQHandler(void) {
 //	int i;
-	// Determine whether GPIO Interrupt P2.10 has occurred
-	if ((LPC_GPIOINT ->IO2IntStatF >> 10) & 0x1) {
-		//printf("GPIO Interrupt 2.10\n");
-		//	for (i=0;i<9999999;i++);
-		// Clear GPIO Interrupt P2.10
-		butSW3 = !butSW3;
-		LPC_GPIOINT ->IO2IntClr = 1 << 10;
-	}
 
+	printf("eint3\n");
+
+	//NVIC_ClearPendingIRQ(EINT0_IRQn);
 	if ((LPC_GPIOINT ->IO2IntStatF >> 5) & 0x1) {
 		lightWarning = 1;
 		//light_setIrqInCycles(LIGHT_CYCLE_1);
-
 		LPC_GPIOINT ->IO2IntClr = (1 << 5);
+
 	}
+}
+
+void EINT0_IRQHandler(void) {
+	// clear interrupt flag for eint0
+	LPC_SC ->EXTINT = (1 << 0);
+	printf("eint0\n");
+	butSW3 = 1;
 }
 
 static void monitor7Seg(uint32_t time) {
@@ -121,13 +131,6 @@ static void monitor7Seg(uint32_t time) {
 
 }
 
-static void printOLED(int clearOLED, int x, int y, unsigned char* toBePrinted) {
-	if (clearOLED)
-		oled_clearScreen(OLED_COLOR_BLACK);
-	oled_putString(x, y, toBePrinted, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-
-}
-
 void setRGB(uint8_t ledCol) {
 	if (ledCol == 0x5) {
 		GPIO_SetValue(2, (1 << 0));
@@ -147,7 +150,6 @@ void setRGB(uint8_t ledCol) {
 }
 
 void blinkRGB() {
-	uint32_t currentMst = msTicks;
 	if (lightWarning && tempWarning) {
 		blinkBothRGB();
 	} else if (lightWarning && !tempWarning) {
@@ -317,14 +319,16 @@ static void init_GPIO(void) {
 
 static void updateOledDisplay(int32_t x, int32_t y, int32_t z, int32_t value) {
 	unsigned char oledString[100] = "x";
+	int light = light_read();
+	double temp = temp_read() / 10.0;
 
 	//NNN_-_T*****_L*****_AX*****_AY*****_AZ*****\r\n
-	//IntToChar(x),IntToChar(y),IntToChar(z)
 	if (value != prevMstVal) {
-		sprintf(oledString, "X: %dY: %dZ: %d", x, y, z);
-		printOLED(1, 0, 0, oledString);
-		sprintf(oledString, "L:%u, T:%0.1lf", light_read(), temp_read() / 10.0);
-		printOLED(0, 0, 20, oledString);
+		sprintf(oledString, "X:%d Y:%d Z:%d", (int) x, (int) y, (int) z);
+		oled_putString(1, 10, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+		sprintf(oledString, "L:%d, T:%0.1lf", (int) light, (float) temp);
+		oled_putString(1, 20, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+
 	}
 	prevMstVal = value;
 
@@ -353,10 +357,6 @@ int main(void) {
 	pca9532_init();
 	acc_init();
 
-	uint8_t data = 0;
-	uint32_t len = 0;
-	uint8_t line[64];
-
 	init_uart();
 	UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg), BLOCKING);
 
@@ -367,9 +367,17 @@ int main(void) {
 	light_setIrqInCycles(LIGHT_CYCLE_1);
 	light_clearIrqStatus();
 
-	LPC_GPIOINT ->IO2IntClr = 1 << 5;
-	LPC_GPIOINT ->IO2IntEnF |= 1 << 5; //light sensor
+	/***initialize for light sensor interrupt****/LPC_GPIOINT ->IO2IntClr = 1
+			<< 5;
+	LPC_GPIOINT ->IO2IntEnF |= 1 << 5;
+	/*** -----------------------------------****/
 
+	//** Enabling interrupts for ENIT0 ** //
+	LPC_SC ->EXTINT = (1 << 0);
+	LPC_PINCON ->PINSEL4 = (1 << PINSEL_EINT0); /* Configure P2_10 as EINT0/1 */
+
+	// Enable EINT0 & EINT3 interrupt
+	NVIC_EnableIRQ(EINT0_IRQn);
 	NVIC_EnableIRQ(EINT3_IRQn);
 
 	oled_init();
@@ -410,10 +418,26 @@ int main(void) {
 		btn1 = (GPIO_ReadValue(1) >> 31) & 0x01;
 
 		if (!btn1 && checkSW4(msTicks)) {
+			if (monitorMode == 0) {
+				oled_putString(1, 0, "MONITOR", OLED_COLOR_WHITE,
+						OLED_COLOR_BLACK);
+				UART_Send(LPC_UART3, (uint8_t *) msgEnterMonitor,
+						strlen(msgEnterMonitor), BLOCKING);
+
+			}
 			monitorMode = !monitorMode;
+		}
+		if (butSW3) {
+			msTicks = 0;
+			butSW3 = 0;
+			LPC_SC ->EXTINT = (1 << 0); // clear interrupt flag for eint0
+			//NVIC_ClearPendingIRQ(EINT0_IRQn);
 		}
 
 		if (monitorMode) {
+
+			//uint32_t currenTemp = temp_interrupt();
+			//printf("%0.1f lol\n", currenTemp / 10.0 );
 
 			uint32_t currentMstValue = msTicks;
 			light_clearIrqStatus();
@@ -427,12 +451,9 @@ int main(void) {
 			//etRGB(3);
 
 			blinkRGB();
-			//printf("%d lightwarning %d tempWarning\n", lightWarning, tempWarning);
-
-			//printf("X: %dY: %dZ: %d\n", x, y, z);
 			float k = temp_read() / 10.0;
 
-			if (k > 26.7) {
+			if (k > 28.0) {
 				tempWarning = 1;
 			}
 
@@ -441,16 +462,19 @@ int main(void) {
 				updateOledDisplay(x, y, z, (currentMstValue / 1000));
 
 				if ((currentMstValue / 1000) % 16 == 15) {
-					if (redLedFlag)
-						UART_Send(LPC_UART3, (uint8_t *) msgFire, strlen(msg),
-								BLOCKING);
+					if (tempWarning)
+						UART_Send(LPC_UART3, (uint8_t *) msgFire,
+								strlen(msgFire), BLOCKING);
 					if (lightWarning)
 						UART_Send(LPC_UART3, (uint8_t *) msgMovementDarkness,
-								strlen(msg), BLOCKING);
+								strlen(msgMovementDarkness), BLOCKING);
 					asprintf(&msg,
 							"%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
 							uartCount++, temp_read() / 10.0, light_read(), x, y,
 							z);
+					/*printf("%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
+					 uartCount++, temp_read() / 10.0, light_read(), x, y,
+					 z);*/
 					UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg),
 							BLOCKING);
 				}
@@ -460,7 +484,10 @@ int main(void) {
 			//monitorMode = 0;
 			//setRGB(3);
 			oled_clearScreen(OLED_COLOR_BLACK);
-			led7seg_setChar('.', FALSE);
+			led7seg_setChar(99999, FALSE);
+			setRGB(8);
+			lightWarning = 0;
+			tempWarning = 0;
 
 		}
 
@@ -471,7 +498,7 @@ int main(void) {
 
 void check_failed(uint8_t *file, uint32_t line) {
 	/* User can add his own implementation to report the file name and line number,
-	 ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+	 "ex: printf"("Wrong parameters value: file %s on line %d\r\n", file, line) */
 
 	/* Infinite loop */
 	while (1)
