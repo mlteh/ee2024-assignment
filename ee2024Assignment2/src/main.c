@@ -16,6 +16,11 @@
 
 #include <stdio.h>
 #define PINSEL_EINT0	20
+#define RGB_BOTH 0x5
+
+//interrupt priority values
+int32_t finalPriority, PG = 5, PPEINT3 = 0b11, SPEINT3 = 0b000;
+int32_t PPEINT0 = 0b10, SPEINT0 = 0b000;
 
 volatile uint32_t msTicks; // counter for 1ms SysTicks
 volatile uint32_t prevMstVal = 0;
@@ -27,11 +32,12 @@ uint32_t temperature = 0;
 uint32_t light = 1;
 uint8_t moved = 0;
 uint8_t monitorMode = 0;
+
 volatile uint32_t prevSW4Count = 0;
 const uint32_t lowestLight = 0;
 const uint32_t highestLight = 2000;
 const uint32_t lightThreshold = 20;
-const double tempThreshold = 30.0; //change for assesment
+const double tempThreshold = 30.0; //change for assessment
 uint8_t lightWarning = 0;
 uint8_t tempWarning = 0;
 uint8_t moveWarning = 0;
@@ -42,6 +48,9 @@ uint8_t blinkBlueLed = 0;
 
 uint16_t led16Val = 0;
 uint8_t numToShift = 16;
+
+uint8_t val7Seg = 0;
+uint32_t prevMstSecs = 0;
 
 volatile uint32_t tempWaveCount = 0;
 uint32_t t1 = 0;
@@ -65,6 +74,7 @@ static char* msgEnterMonitor = "Entering MONITOR Mode.\r\n";
 void blinkBothRGB();
 void blinkBlueRGB();
 void blinkRedRGB();
+int32_t temp_interrupt(uint32_t, uint32_t);
 
 // ****************
 //  SysTick_Handler - just increment SysTick counter
@@ -89,9 +99,10 @@ void EINT3_IRQHandler(void) {
 		int pin2 = (GPIO_ReadValue(0) >> 25);
 		//printf( "1st: %d 2nd: %d \n", pin1 , pin2);
 
-		if (( (pin1 == 0 && pin2 == 0) || (pin1 == 4 && pin2 == 2)) && numToShift <= 15)
+		if (((pin1 == 0 && pin2 == 0) || (pin1 == 4 && pin2 == 2))
+				&& numToShift <= 15)
 			numToShift++;
-		else if (pin1 > pin2  && pin1 != 4 && numToShift > 0)
+		else if (pin1 > pin2 && pin1 != 4 && numToShift > 0)
 			numToShift--;
 
 		LPC_GPIOINT ->IO0IntClr = (1 << 24);
@@ -119,59 +130,31 @@ static void monitor7Seg(uint32_t time) {
 	switch (time) {
 
 	case 0:
-		led7seg_setChar('0', 0);
-		break;
 	case 1:
-		led7seg_setChar('1', 0);
-		break;
 	case 2:
-		led7seg_setChar('2', 0);
-		break;
 	case 3:
-		led7seg_setChar('3', 0);
-		break;
 	case 4:
-		led7seg_setChar('4', 0);
-		break;
 	case 5:
-		led7seg_setChar('5', 0);
-		break;
 	case 6:
-		led7seg_setChar('6', 0);
-		break;
 	case 7:
-		led7seg_setChar('7', 0);
-		break;
 	case 8:
-		led7seg_setChar('8', 0);
-		break;
 	case 9:
-		led7seg_setChar('9', 0);
+		led7seg_setChar('0' + time, 0);
 		break;
 	case 10:
-		led7seg_setChar('A', 0);
-		break;
 	case 11:
-		led7seg_setChar('B', 0);
-		break;
 	case 12:
-		led7seg_setChar('C', 0);
-		break;
 	case 13:
-		led7seg_setChar('D', 0);
-		break;
 	case 14:
-		led7seg_setChar('E', 0);
-		break;
 	case 15:
-		led7seg_setChar('F', 0);
-
+		led7seg_setChar('A' + time % 10, 0);
+		break;
 	}
 
 }
 
 void setRGB(uint8_t ledCol) {
-	if (ledCol == 0x5) {
+	if (ledCol == RGB_BOTH) {
 		GPIO_SetValue(2, (1 << 0));
 		GPIO_SetValue(0, (1 << 26));
 	} else {
@@ -211,7 +194,7 @@ void blinkBothRGB() {
 		brPrevMst = currentMst;
 	}
 	if (brLedFlag) {
-		setRGB(0x5);
+		setRGB(RGB_BOTH);
 	} else {
 		setRGB(8);
 	}
@@ -242,6 +225,11 @@ void blinkRedRGB() {
 	else
 		setRGB(8);
 
+}
+
+void activate_supplement_lights() {
+	led16Val = (65535 >> numToShift);
+	pca9532_setLeds(led16Val, 0xffff);
 }
 
 void pinsel_uart3(void) {
@@ -372,7 +360,9 @@ static void init_GPIO(void) {
 }
 
 static void reset() {
-	led7seg_setChar(99999, FALSE);
+	led7seg_setChar(255, FALSE);
+	numToShift = 16;
+	pca9532_setLeds(0, 0xffff);
 	setRGB(8);
 	lightWarning = 0;
 	tempWarning = 0;
@@ -390,19 +380,18 @@ static void updateOledDisplay(int32_t x, int32_t y, int32_t z, int32_t value) {
 	//NNN_-_T*****_L*****_AX*****_AY*****_AZ*****\r\n
 	if (value != prevMstVal) {
 
-		sprintf(oledString, "L:%d\n", (int) light);
+		sprintf(oledString, "L:%d     \n", light);
 		oled_putString(1, 10, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
 		sprintf(oledString, "T:%0.1lfC\n", temp);
 		oled_putString(40, 10, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-		sprintf(oledString, "X:%d\n", (int) x);
+		sprintf(oledString, "X:%d   \n", x);
 		oled_putString(1, 20, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-		sprintf(oledString, "Y:%d\n", (int) y);
+		sprintf(oledString, "Y:%d   \n", y);
 		oled_putString(1, 30, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-		sprintf(oledString, "Z:%d\n", (int) z);
+		sprintf(oledString, "Z:%d   \n", z);
 		oled_putString(1, 40, oledString, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
 
-
-		if (light < lightThreshold )
+		if (light < lightThreshold)
 			oled_putString(20, 50, "Dark\n", OLED_COLOR_BLACK,
 					OLED_COLOR_WHITE);
 		else
@@ -430,6 +419,7 @@ static int checkSW4(uint32_t currentSW4Count) {
 int main(void) {
 
 	/* Enable and setup SysTick Timer at a periodic rate 1 msec*/
+	;
 	SysTick_Config(SystemCoreClock / 1000);
 
 	init_i2c();
@@ -467,7 +457,17 @@ int main(void) {
 	LPC_SC ->EXTINT = (1 << 0);
 	LPC_PINCON ->PINSEL4 = (1 << PINSEL_EINT0); /* Configure P2_10 as EINT0/1 */
 
+	//Setting interrupt priorities
+	NVIC_SetPriorityGrouping(5);
+	finalPriority = NVIC_EncodePriority(PG, PPEINT3, SPEINT3);
+	NVIC_SetPriority(EINT3_IRQn, finalPriority);
+	finalPriority = NVIC_EncodePriority(PG, PPEINT0, SPEINT0);
+	NVIC_SetPriority(EINT0_IRQn, finalPriority);
+	NVIC_SetPriority(SysTick_IRQn, 0x00);
+
 	// Enable EINT0 & EINT3 interrupt
+	NVIC_ClearPendingIRQ(EINT3_IRQn);
+	NVIC_ClearPendingIRQ(EINT0_IRQn);
 	NVIC_EnableIRQ(EINT0_IRQn);
 	NVIC_EnableIRQ(EINT3_IRQn);
 
@@ -506,6 +506,7 @@ int main(void) {
 				UART_Send(LPC_UART3, (uint8_t *) msgEnterMonitor,
 						strlen(msgEnterMonitor), BLOCKING);
 				t1 = msTicks;
+				light_read();	//simply just to meet assignment requirements
 
 			}
 			monitorMode = !monitorMode;
@@ -520,17 +521,18 @@ int main(void) {
 			yoff = 0 - y;
 			zoff = 64 - z;
 			reset();
-			msTicks = 0;
+			val7Seg = 0;
 			t1 = msTicks;
 		}
 
 		if (monitorMode) {
-			led16Val = (65535 >> numToShift);
-			pca9532_setLeds(led16Val, 0xffff);
+
+			if (blinkBlueLed) {
+				activate_supplement_lights();
+			}
 
 			uint32_t currentMstValue = msTicks;
 			light_clearIrqStatus();
-			monitor7Seg((currentMstValue / 1000) % 16);
 
 			acc_read(&x, &y, &z);
 			x = x + xoff;
@@ -553,29 +555,37 @@ int main(void) {
 				moved = 1;
 			} else
 				moved = 0;
+			//printf ("%d\n",val7Seg);
 
-			if (((currentMstValue / 1000) % 16) % 5 == 0
-					&& ((currentMstValue / 1000) % 16) > 0) {
-				updateOledDisplay(x, y, z, (currentMstValue / 1000));
+			if (prevMstSecs != currentMstValue / 1000) {
+				monitor7Seg(val7Seg);
 
-				if ((currentMstValue / 1000) % 16 == 15
-						&& ((currentMstValue / 1000) != prevMstValUart)) {
+				prevMstSecs = currentMstValue / 1000;
 
-					if (blinkRedLed)
-						UART_Send(LPC_UART3, (uint8_t *) msgFire,
-								strlen(msgFire), BLOCKING);
-					if (blinkBlueLed)
-						UART_Send(LPC_UART3, (uint8_t *) msgMovementDarkness,
-								strlen(msgMovementDarkness), BLOCKING);
-					asprintf(&msg,
-							"%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
-							uartCount++, currentTemperature / 10.0,
-							light_read(), x, y, z);
-					UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg),
-							BLOCKING);
+				if (val7Seg % 5 == 0 && val7Seg != 0) {
+					updateOledDisplay(x, y, z, (currentMstValue / 1000));
 
-					prevMstValUart = currentMstValue / 1000;
+					if (val7Seg == 15 ) {  //&& ((currentMstValue / 1000) != prevMstValUart
+
+						if (blinkRedLed)
+							UART_Send(LPC_UART3, (uint8_t *) msgFire,
+									strlen(msgFire), BLOCKING);
+						if (blinkBlueLed)
+							UART_Send(LPC_UART3,
+									(uint8_t *) msgMovementDarkness,
+									strlen(msgMovementDarkness), BLOCKING);
+						asprintf(&msg,
+								"%03d_-_T%0.1lf_L%d_AX%03d_AY%03d_AZ%03d\r\n",
+								uartCount++, currentTemperature / 10.0,
+								light_read(), x, y, z);
+						UART_Send(LPC_UART3, (uint8_t *) msg, strlen(msg),
+								BLOCKING);
+
+						prevMstValUart = currentMstValue / 1000;
+					}
 				}
+
+				val7Seg = (val7Seg + 1) % 16;
 			}
 
 		} else {

@@ -141,8 +141,13 @@ int32_t temp_read(void) {
 	return ((2 * 1000 * t2) / (NUM_HALF_PERIODS * TEMP_SCALAR_DIV10) - 2731);
 }
 
-int32_t temp_interrupt(void) {
+int32_t temp_interrupt(uint32_t t1, uint32_t t2) {
 
-	return 1;
+	if (t2 > t1) {
+		t2 = t2 - t1;
+	} else {
+		t2 = (0xFFFFFFFF - t1 + 1) + t2;
+	}
+	return ((2 * 1000 * t2) / (NUM_HALF_PERIODS * TEMP_SCALAR_DIV10) - 2731);
 
 }
